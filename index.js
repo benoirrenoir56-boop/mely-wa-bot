@@ -42,6 +42,17 @@ app.get('/health', (req, res) => {
     res.status(200).send('OK');
 });
 
+// Auto-ping pour garder le serveur éveillé sur Render (plan gratuit)
+const RENDER_URL = process.env.RENDER_EXTERNAL_URL || 'https://mely-wa-bot.onrender.com';
+setInterval(() => {
+    const http = require('https');
+    http.get(`${RENDER_URL}/health`, (res) => {
+        console.log('Auto-ping: serveur actif');
+    }).on('error', (err) => {
+        console.log('Auto-ping erreur:', err.message);
+    });
+}, 10 * 60 * 1000); // Toutes les 10 minutes
+
 app.listen(port, () => {
     console.log(`Serveur web démarré sur le port ${port}`);
 });
