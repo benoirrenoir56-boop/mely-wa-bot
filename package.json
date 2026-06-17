@@ -10,9 +10,13 @@
   "author": "",
   "license": "ISC",
   "description": "WhatsApp Bot for Melly Shop",
+  "engines": {
+    "node": "18.x"
+  },
   "dependencies": {
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "puppeteer": "^21.11.0",
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
     "whatsapp-web.js": "^1.26.0"
