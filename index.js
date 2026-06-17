@@ -88,7 +88,7 @@ async function startBot() {
         // Ignorer les groupes
         if (from.endsWith('@g.us')) return;
 
-        const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
+        const text = msg.message.conversation || msg.message.extendedTextMessage?.text || msg.message.buttonsResponseMessage?.selectedButtonId || msg.message.listResponseMessage?.singleSelectReply?.selectedRowId || msg.message.templateButtonReplyMessage?.selectedId || '';
         const userMessage = text.toLowerCase().trim();
         const sender = msg.pushName || from.split('@')[0];
 
