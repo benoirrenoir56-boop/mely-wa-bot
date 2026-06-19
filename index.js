@@ -59,6 +59,24 @@ app.listen(port, () => {
 
 const OWNER_NUMBER = '2250719347745';
 
+// Anti-spam : délai entre les réponses et limitation
+const messageTimestamps = {};
+const MIN_DELAY_MS = 2000; // Délai minimum de 2 secondes avant de répondre
+const RATE_LIMIT_WINDOW = 60000; // Fenêtre de 1 minute
+const MAX_MESSAGES_PER_WINDOW = 10; // Max 10 messages par minute
+
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+function isRateLimited(from) {
+    const now = Date.now();
+    if (!messageTimestamps[from]) messageTimestamps[from] = [];
+    // Nettoyer les anciens timestamps
+    messageTimestamps[from] = messageTimestamps[from].filter(t => now - t < RATE_LIMIT_WINDOW);
+    if (messageTimestamps[from].length >= MAX_MESSAGES_PER_WINDOW) return true;
+    messageTimestamps[from].push(now);
+    return false;
+}
+
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info');
 
@@ -91,20 +109,41 @@ async function startBot() {
         }
     });
 
-    sock.ev.on('messages.upsert', async ({ messages }) => {
-        const msg = messages[0];
-        if (!msg.message || msg.key.fromMe) return;
+    sock.ev.on('messages.upsert', async ({ messages, type }) => {
+        // Ne traiter que les messages "notify" (nouveaux messages)
+        if (type !== 'notify') return;
+
+        for (const msg of messages) {
+        if (!msg.message || msg.key.fromMe) continue;
 
         const from = msg.key.remoteJid;
         // Ignorer les groupes
-        if (from.endsWith('@g.us')) return;
+        if (from.endsWith('@g.us')) continue;
 
-        const text = msg.message.conversation || msg.message.extendedTextMessage?.text || msg.message.buttonsResponseMessage?.selectedButtonId || msg.message.listResponseMessage?.singleSelectReply?.selectedRowId || msg.message.templateButtonReplyMessage?.selectedId || '';
+        // Extraire le texte du message (supporter tous les types)
+        const msgContent = msg.message;
+        const text = msgContent.conversation 
+            || msgContent.extendedTextMessage?.text 
+            || msgContent.buttonsResponseMessage?.selectedButtonId 
+            || msgContent.listResponseMessage?.singleSelectReply?.selectedRowId 
+            || msgContent.templateButtonReplyMessage?.selectedId 
+            || msgContent.imageMessage?.caption
+            || msgContent.videoMessage?.caption
+            || '';
+        
+        console.log(`Message reçu de ${from}: "${text}"`);
         const userMessage = text.toLowerCase().trim();
         const sender = msg.pushName || from.split('@')[0];
 
         async function sendMsg(to, message) {
+            await sleep(MIN_DELAY_MS + Math.random() * 1000); // Délai naturel 2-3s
             await sock.sendMessage(to, { text: message });
+        }
+
+        // Vérifier le rate limit
+        if (isRateLimited(from)) {
+            console.log(`Rate limit atteint pour ${from}, message ignoré.`);
+            continue;
         }
 
         if (userMessage === 'menu' || userMessage === 'salut' || userMessage === 'bonjour' || userMessage === 'hi' || userMessage === 'hello' || userMessage === 'start' || userMessage === 'bonsoir') {
@@ -175,6 +214,7 @@ async function startBot() {
             await sendMsg(from, `✅ *Commande enregistrée !*\n\nVeuillez procéder au paiement via Wave, MTN ou Orange Money, puis envoyez la capture d'écran ici.\n\nLe propriétaire a été notifié et traitera votre commande rapidement. ⏱️`);
             await sendMsg(`${OWNER_NUMBER}@s.whatsapp.net`, `🛒 *Nouvelle Commande* de ${sender} (${from}) :\n\n"${text}"\n\n_Veuillez vérifier le paiement et traiter la commande._`);
         }
+        } // fin du for
     });
 }
 
