@@ -77,6 +77,15 @@ function isRateLimited(from) {
     return false;
 }
 
+// Supprimer les anciennes sessions au démarrage pour forcer un nouveau QR code
+const fs = require('fs');
+const path = require('path');
+const authDir = path.join(__dirname, 'auth_info');
+if (fs.existsSync(authDir)) {
+    fs.rmSync(authDir, { recursive: true, force: true });
+    console.log('Anciennes données de session supprimées.');
+}
+
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info');
 
