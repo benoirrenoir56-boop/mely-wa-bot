@@ -2,25 +2,70 @@ const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = requi
 const pino = require('pino');
 const qrcode = require('qrcode');
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 const { products, payments, faq } = require('./data');
 
 const app = express();
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 const port = process.env.PORT || 3000;
 let lastQr = "";
+let pairingCode = "";
 let connectionStatus = "disconnected";
+let sock = null;
 
-// Serveur HTTP pour garder le bot actif et afficher le QR Code
+// Supprimer les anciennes sessions au démarrage pour forcer un nouveau QR/pairing code
+const authDir = path.join(__dirname, 'auth_info');
+if (fs.existsSync(authDir)) {
+    fs.rmSync(authDir, { recursive: true, force: true });
+    console.log('Anciennes données de session supprimées.');
+}
+
+// Page web avec option QR code ET pairing code
 app.get('/', (req, res) => {
-    if (lastQr) {
+    if (connectionStatus === 'connected') {
         res.send(`
             <html>
                 <head><meta name="viewport" content="width=device-width, initial-scale=1"></head>
-                <body style="display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:100vh; font-family:sans-serif; background:#1a1a1a; color:white; padding:20px;">
+                <body style="display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:100vh; font-family:sans-serif; background:#1a1a1a; color:white; padding:20px; text-align:center;">
+                    <h1>🤖 Melly Shop Bot</h1>
+                    <p>Statut : <b>✅ Connecté</b></p>
+                    <p>Le bot est actif et répond aux messages.</p>
+                </body>
+            </html>
+        `);
+    } else if (pairingCode) {
+        res.send(`
+            <html>
+                <head><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+                <body style="display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:100vh; font-family:sans-serif; background:#1a1a1a; color:white; padding:20px; text-align:center;">
+                    <h1>🤖 Melly Shop Bot</h1>
+                    <h2>Code de jumelage :</h2>
+                    <p style="font-size:36px; font-weight:bold; background:#333; padding:20px 40px; border-radius:10px; letter-spacing:5px; color:#00ff88;">${pairingCode}</p>
+                    <p>Allez dans WhatsApp :</p>
+                    <p><b>Paramètres > Appareils connectés > Connecter un appareil > Connecter avec un numéro de téléphone</b></p>
+                    <p>Entrez ce code dans WhatsApp.</p>
+                    <p><i>Le code expire après 60 secondes. <a href="/" style="color:#0088cc;">Actualisez</a> pour un nouveau.</i></p>
+                </body>
+            </html>
+        `);
+    } else if (lastQr) {
+        res.send(`
+            <html>
+                <head><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+                <body style="display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:100vh; font-family:sans-serif; background:#1a1a1a; color:white; padding:20px; text-align:center;">
                     <h1>🤖 Melly Shop Bot</h1>
                     <p>Scannez ce QR code avec votre WhatsApp :</p>
-                    <p><b>Paramètres > Appareils connectés > Connecter un appareil</b></p>
                     <img src="${lastQr}" style="width:280px; height:280px; border-radius:10px;"/>
-                    <p><i>Actualisez la page si le code expire.</i></p>
+                    <p style="margin-top:20px;">— OU —</p>
+                    <p><b>Utilisez le mode Pairing (plus facile depuis mobile) :</b></p>
+                    <form action="/pair" method="POST" style="margin-top:10px;">
+                        <input type="text" name="phone" placeholder="Votre numéro (ex: 2250719347745)" style="padding:10px; font-size:16px; border-radius:5px; border:none; width:250px;"/>
+                        <br/><br/>
+                        <button type="submit" style="padding:12px 30px; font-size:16px; background:#00ff88; color:black; border:none; border-radius:5px; font-weight:bold; cursor:pointer;">Obtenir le code</button>
+                    </form>
+                    <p><i>Entrez votre numéro avec l'indicatif pays (sans + ni espaces)</i></p>
                 </body>
             </html>
         `);
@@ -28,10 +73,69 @@ app.get('/', (req, res) => {
         res.send(`
             <html>
                 <head><meta name="viewport" content="width=device-width, initial-scale=1"></head>
-                <body style="display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:100vh; font-family:sans-serif; background:#1a1a1a; color:white; padding:20px;">
+                <body style="display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:100vh; font-family:sans-serif; background:#1a1a1a; color:white; padding:20px; text-align:center;">
                     <h1>🤖 Melly Shop Bot</h1>
-                    <p>Statut : <b>${connectionStatus === 'connected' ? '✅ Connecté' : '⏳ En attente...'}</b></p>
-                    <p>${connectionStatus === 'connected' ? 'Le bot est actif et répond aux messages.' : 'Patientez, le QR code va apparaître. Actualisez la page.'}</p>
+                    <p>Statut : <b>⏳ En attente...</b></p>
+                    <p>Patientez, le QR code va apparaître. <a href="/" style="color:#0088cc;">Actualisez la page.</a></p>
+                    <p style="margin-top:20px;">— OU —</p>
+                    <p><b>Utilisez le mode Pairing (plus facile depuis mobile) :</b></p>
+                    <form action="/pair" method="POST" style="margin-top:10px;">
+                        <input type="text" name="phone" placeholder="Votre numéro (ex: 2250719347745)" style="padding:10px; font-size:16px; border-radius:5px; border:none; width:250px;"/>
+                        <br/><br/>
+                        <button type="submit" style="padding:12px 30px; font-size:16px; background:#00ff88; color:black; border:none; border-radius:5px; font-weight:bold; cursor:pointer;">Obtenir le code</button>
+                    </form>
+                    <p><i>Entrez votre numéro avec l'indicatif pays (sans + ni espaces)</i></p>
+                </body>
+            </html>
+        `);
+    }
+});
+
+// Route pour le pairing code
+app.post('/pair', async (req, res) => {
+    const phone = req.body.phone?.replace(/[^0-9]/g, '');
+    if (!phone || phone.length < 10) {
+        res.send(`
+            <html>
+                <head><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+                <body style="display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:100vh; font-family:sans-serif; background:#1a1a1a; color:white; padding:20px; text-align:center;">
+                    <h1>❌ Erreur</h1>
+                    <p>Numéro invalide. Entrez votre numéro avec l'indicatif pays (ex: 2250719347745)</p>
+                    <a href="/" style="color:#0088cc;">Retour</a>
+                </body>
+            </html>
+        `);
+        return;
+    }
+
+    try {
+        if (sock && sock.requestPairingCode) {
+            const code = await sock.requestPairingCode(phone);
+            pairingCode = code;
+            console.log(`Code de jumelage généré pour ${phone}: ${code}`);
+            res.redirect('/');
+        } else {
+            res.send(`
+                <html>
+                    <head><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+                    <body style="display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:100vh; font-family:sans-serif; background:#1a1a1a; color:white; padding:20px; text-align:center;">
+                        <h1>⏳ Patientez</h1>
+                        <p>Le bot est en train de démarrer. Réessayez dans quelques secondes.</p>
+                        <a href="/" style="color:#0088cc;">Retour</a>
+                    </body>
+                </html>
+            `);
+        }
+    } catch (err) {
+        console.error('Erreur pairing:', err);
+        res.send(`
+            <html>
+                <head><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+                <body style="display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:100vh; font-family:sans-serif; background:#1a1a1a; color:white; padding:20px; text-align:center;">
+                    <h1>❌ Erreur</h1>
+                    <p>Impossible de générer le code. Réessayez.</p>
+                    <p style="font-size:12px; color:#888;">${err.message}</p>
+                    <a href="/" style="color:#0088cc;">Retour</a>
                 </body>
             </html>
         `);
@@ -45,13 +149,13 @@ app.get('/health', (req, res) => {
 // Auto-ping pour garder le serveur éveillé sur Render (plan gratuit)
 const RENDER_URL = process.env.RENDER_EXTERNAL_URL || 'https://mely-wa-bot.onrender.com';
 setInterval(() => {
-    const http = require('https');
-    http.get(`${RENDER_URL}/health`, (res) => {
+    const https = require('https');
+    https.get(`${RENDER_URL}/health`, (res) => {
         console.log('Auto-ping: serveur actif');
     }).on('error', (err) => {
         console.log('Auto-ping erreur:', err.message);
     });
-}, 10 * 60 * 1000); // Toutes les 10 minutes
+}, 10 * 60 * 1000);
 
 app.listen(port, () => {
     console.log(`Serveur web démarré sur le port ${port}`);
@@ -61,37 +165,28 @@ const OWNER_NUMBER = '2250719347745';
 
 // Anti-spam : délai entre les réponses et limitation
 const messageTimestamps = {};
-const MIN_DELAY_MS = 2000; // Délai minimum de 2 secondes avant de répondre
-const RATE_LIMIT_WINDOW = 60000; // Fenêtre de 1 minute
-const MAX_MESSAGES_PER_WINDOW = 10; // Max 10 messages par minute
+const MIN_DELAY_MS = 2000;
+const RATE_LIMIT_WINDOW = 60000;
+const MAX_MESSAGES_PER_WINDOW = 10;
 
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
 function isRateLimited(from) {
     const now = Date.now();
     if (!messageTimestamps[from]) messageTimestamps[from] = [];
-    // Nettoyer les anciens timestamps
     messageTimestamps[from] = messageTimestamps[from].filter(t => now - t < RATE_LIMIT_WINDOW);
     if (messageTimestamps[from].length >= MAX_MESSAGES_PER_WINDOW) return true;
     messageTimestamps[from].push(now);
     return false;
 }
 
-// Supprimer les anciennes sessions au démarrage pour forcer un nouveau QR code
-const fs = require('fs');
-const path = require('path');
-const authDir = path.join(__dirname, 'auth_info');
-if (fs.existsSync(authDir)) {
-    fs.rmSync(authDir, { recursive: true, force: true });
-    console.log('Anciennes données de session supprimées.');
-}
-
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info');
 
-    const sock = makeWASocket({
+    sock = makeWASocket({
         auth: state,
         logger: pino({ level: 'silent' }),
+        printQRInTerminal: false,
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -102,128 +197,128 @@ async function startBot() {
         if (qr) {
             console.log('Nouveau QR Code généré.');
             lastQr = await qrcode.toDataURL(qr);
+            pairingCode = ""; // Reset pairing code quand un nouveau QR arrive
         }
 
         if (connection === 'close') {
             const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
             console.log('Connexion fermée. Reconnexion :', shouldReconnect);
             connectionStatus = "disconnected";
+            lastQr = "";
+            pairingCode = "";
             if (shouldReconnect) {
-                startBot();
+                setTimeout(() => startBot(), 3000);
             }
         } else if (connection === 'open') {
             console.log('Le bot Melly Shop est connecté !');
             connectionStatus = "connected";
             lastQr = "";
+            pairingCode = "";
         }
     });
 
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
-        // Ne traiter que les messages "notify" (nouveaux messages)
         if (type !== 'notify') return;
 
         for (const msg of messages) {
-        if (!msg.message || msg.key.fromMe) continue;
+            if (!msg.message || msg.key.fromMe) continue;
 
-        const from = msg.key.remoteJid;
-        // Ignorer les groupes
-        if (from.endsWith('@g.us')) continue;
+            const from = msg.key.remoteJid;
+            if (from.endsWith('@g.us')) continue;
 
-        // Extraire le texte du message (supporter tous les types)
-        const msgContent = msg.message;
-        const text = msgContent.conversation 
-            || msgContent.extendedTextMessage?.text 
-            || msgContent.buttonsResponseMessage?.selectedButtonId 
-            || msgContent.listResponseMessage?.singleSelectReply?.selectedRowId 
-            || msgContent.templateButtonReplyMessage?.selectedId 
-            || msgContent.imageMessage?.caption
-            || msgContent.videoMessage?.caption
-            || '';
-        
-        console.log(`Message reçu de ${from}: "${text}"`);
-        const userMessage = text.toLowerCase().trim();
-        const sender = msg.pushName || from.split('@')[0];
+            const msgContent = msg.message;
+            const text = msgContent.conversation 
+                || msgContent.extendedTextMessage?.text 
+                || msgContent.buttonsResponseMessage?.selectedButtonId 
+                || msgContent.listResponseMessage?.singleSelectReply?.selectedRowId 
+                || msgContent.templateButtonReplyMessage?.selectedId 
+                || msgContent.imageMessage?.caption
+                || msgContent.videoMessage?.caption
+                || '';
+            
+            console.log(`Message reçu de ${from}: "${text}"`);
+            const userMessage = text.toLowerCase().trim();
+            const sender = msg.pushName || from.split('@')[0];
 
-        async function sendMsg(to, message) {
-            await sleep(MIN_DELAY_MS + Math.random() * 1000); // Délai naturel 2-3s
-            await sock.sendMessage(to, { text: message });
+            async function sendMsg(to, message) {
+                await sleep(MIN_DELAY_MS + Math.random() * 1000);
+                await sock.sendMessage(to, { text: message });
+            }
+
+            if (isRateLimited(from)) {
+                console.log(`Rate limit atteint pour ${from}, message ignoré.`);
+                continue;
+            }
+
+            if (userMessage === 'menu' || userMessage === 'salut' || userMessage === 'bonjour' || userMessage === 'hi' || userMessage === 'hello' || userMessage === 'start' || userMessage === 'bonsoir') {
+                const welcomeMessage = `🌟 *Bienvenue chez Melly Shop* 🌟\n_Recharge rapide, fiable et sécurisée_\n\nBonjour ${sender} ! Comment puis-je vous aider aujourd'hui ?\n\nVeuillez choisir une option en tapant le numéro correspondant :\n\n1️⃣ *Free Fire* (Diamants)\n2️⃣ *Blood Strike* (Gold)\n3️⃣ *PUBG Mobile* (UC)\n4️⃣ *Formation VPN*\n5️⃣ *Numéros Virtuels*\n6️⃣ *Moyens de Paiement*\n7️⃣ *Questions Fréquentes (FAQ)*\n8️⃣ *Parler à un conseiller*\n\n_Tapez "menu" à tout moment pour revenir ici._`;
+                await sendMsg(from, welcomeMessage);
+                continue;
+            }
+
+            switch (userMessage) {
+                case '1':
+                    let ffMsg = `💎 *Tarifs Free Fire (Diamants)* 💎\n\n`;
+                    products.free_fire.items.forEach((item, index) => {
+                        ffMsg += `${index + 1}. ${item.amount} Diamants - ${item.price} FrCFA\n`;
+                    });
+                    ffMsg += `\n📝 *Pour commander* : Envoyez "Commander FF [numéro du pack] [Votre ID Free Fire]"\nExemple : Commander FF 3 123456789`;
+                    await sendMsg(from, ffMsg);
+                    break;
+                case '2':
+                    let bsMsg = `⚔️ *Tarifs Blood Strike (Gold)* ⚔️\n\n`;
+                    products.blood_strike.items.forEach((item, index) => {
+                        bsMsg += `${index + 1}. ${item.amount} - ${item.price} FrCFA\n`;
+                    });
+                    bsMsg += `\n📝 *Pour commander* : Envoyez "Commander BS [numéro du pack] [Votre ID]"\nExemple : Commander BS 2 987654321`;
+                    await sendMsg(from, bsMsg);
+                    break;
+                case '3':
+                    let pubgMsg = `🔫 *Tarifs PUBG Mobile (UC)* 🔫\n\n`;
+                    products.pubg.items.forEach((item, index) => {
+                        pubgMsg += `${index + 1}. ${item.amount} - ${item.price} FrCFA\n`;
+                    });
+                    pubgMsg += `\n📝 *Pour commander* : Envoyez "Commander PUBG [numéro du pack] [Votre ID]"\nExemple : Commander PUBG 1 456789123`;
+                    await sendMsg(from, pubgMsg);
+                    break;
+                case '4':
+                    let vpnMsg = `🌐 *Formation VPN* 🌐\n\nOutils : ${products.vpn.tools}\n\n`;
+                    products.vpn.items.forEach((item, index) => {
+                        vpnMsg += `${index + 1}. ${item.amount} - ${item.price} FrCFA\n`;
+                    });
+                    vpnMsg += `\n📝 *Pour commander* : Envoyez "Commander VPN [numéro du pack]"\nExemple : Commander VPN 1`;
+                    await sendMsg(from, vpnMsg);
+                    break;
+                case '5':
+                    let vnMsg = `📱 *${products.virtual_numbers.name}* 📱\n\n${products.virtual_numbers.description}\n\n💰 Prix : ${products.virtual_numbers.price}\n\n📝 *Pour commander* : Envoyez "Commander Numero"`;
+                    await sendMsg(from, vnMsg);
+                    break;
+                case '6':
+                    let payMsg = `💰 *Moyens de Paiement Acceptés* 💰\n\n`;
+                    payments.forEach(p => {
+                        payMsg += `• *${p.name}* : ${p.details}\n`;
+                    });
+                    payMsg += `\n_Une fois le paiement effectué, envoyez une capture d'écran ici._`;
+                    await sendMsg(from, payMsg);
+                    break;
+                case '7':
+                    let faqMsg = `❓ *Questions Fréquentes* ❓\n\n`;
+                    faq.forEach(f => {
+                        faqMsg += `*Q: ${f.q}*\nR: ${f.a}\n\n`;
+                    });
+                    await sendMsg(from, faqMsg);
+                    break;
+                case '8':
+                    await sendMsg(from, `👨‍💻 Un conseiller va vous répondre dès que possible. Veuillez patienter.`);
+                    await sendMsg(`${OWNER_NUMBER}@s.whatsapp.net`, `🔔 *Alerte* : Le client ${sender} (${from}) souhaite parler à un conseiller.`);
+                    break;
+            }
+
+            if (userMessage.startsWith('commander')) {
+                await sendMsg(from, `✅ *Commande enregistrée !*\n\nVeuillez procéder au paiement via Wave, MTN ou Orange Money, puis envoyez la capture d'écran ici.\n\nLe propriétaire a été notifié et traitera votre commande rapidement. ⏱️`);
+                await sendMsg(`${OWNER_NUMBER}@s.whatsapp.net`, `🛒 *Nouvelle Commande* de ${sender} (${from}) :\n\n"${text}"\n\n_Veuillez vérifier le paiement et traiter la commande._`);
+            }
         }
-
-        // Vérifier le rate limit
-        if (isRateLimited(from)) {
-            console.log(`Rate limit atteint pour ${from}, message ignoré.`);
-            continue;
-        }
-
-        if (userMessage === 'menu' || userMessage === 'salut' || userMessage === 'bonjour' || userMessage === 'hi' || userMessage === 'hello' || userMessage === 'start' || userMessage === 'bonsoir') {
-            const welcomeMessage = `🌟 *Bienvenue chez Melly Shop* 🌟\n_Recharge rapide, fiable et sécurisée_\n\nBonjour ${sender} ! Comment puis-je vous aider aujourd'hui ?\n\nVeuillez choisir une option en tapant le numéro correspondant :\n\n1️⃣ *Free Fire* (Diamants)\n2️⃣ *Blood Strike* (Gold)\n3️⃣ *PUBG Mobile* (UC)\n4️⃣ *Formation VPN*\n5️⃣ *Numéros Virtuels*\n6️⃣ *Moyens de Paiement*\n7️⃣ *Questions Fréquentes (FAQ)*\n8️⃣ *Parler à un conseiller*\n\n_Tapez "menu" à tout moment pour revenir ici._`;
-            await sendMsg(from, welcomeMessage);
-            return;
-        }
-
-        switch (userMessage) {
-            case '1':
-                let ffMsg = `💎 *Tarifs Free Fire (Diamants)* 💎\n\n`;
-                products.free_fire.items.forEach((item, index) => {
-                    ffMsg += `${index + 1}. ${item.amount} Diamants - ${item.price} FrCFA\n`;
-                });
-                ffMsg += `\n📝 *Pour commander* : Envoyez "Commander FF [numéro du pack] [Votre ID Free Fire]"\nExemple : Commander FF 3 123456789`;
-                await sendMsg(from, ffMsg);
-                break;
-            case '2':
-                let bsMsg = `⚔️ *Tarifs Blood Strike (Gold)* ⚔️\n\n`;
-                products.blood_strike.items.forEach((item, index) => {
-                    bsMsg += `${index + 1}. ${item.amount} - ${item.price} FrCFA\n`;
-                });
-                bsMsg += `\n📝 *Pour commander* : Envoyez "Commander BS [numéro du pack] [Votre ID]"\nExemple : Commander BS 2 987654321`;
-                await sendMsg(from, bsMsg);
-                break;
-            case '3':
-                let pubgMsg = `🔫 *Tarifs PUBG Mobile (UC)* 🔫\n\n`;
-                products.pubg.items.forEach((item, index) => {
-                    pubgMsg += `${index + 1}. ${item.amount} - ${item.price} FrCFA\n`;
-                });
-                pubgMsg += `\n📝 *Pour commander* : Envoyez "Commander PUBG [numéro du pack] [Votre ID]"\nExemple : Commander PUBG 1 456789123`;
-                await sendMsg(from, pubgMsg);
-                break;
-            case '4':
-                let vpnMsg = `🌐 *Formation VPN* 🌐\n\nOutils : ${products.vpn.tools}\n\n`;
-                products.vpn.items.forEach((item, index) => {
-                    vpnMsg += `${index + 1}. ${item.amount} - ${item.price} FrCFA\n`;
-                });
-                vpnMsg += `\n📝 *Pour commander* : Envoyez "Commander VPN [numéro du pack]"\nExemple : Commander VPN 1`;
-                await sendMsg(from, vpnMsg);
-                break;
-            case '5':
-                let vnMsg = `📱 *${products.virtual_numbers.name}* 📱\n\n${products.virtual_numbers.description}\n\n💰 Prix : ${products.virtual_numbers.price}\n\n📝 *Pour commander* : Envoyez "Commander Numero"`;
-                await sendMsg(from, vnMsg);
-                break;
-            case '6':
-                let payMsg = `💰 *Moyens de Paiement Acceptés* 💰\n\n`;
-                payments.forEach(p => {
-                    payMsg += `• *${p.name}* : ${p.details}\n`;
-                });
-                payMsg += `\n_Une fois le paiement effectué, envoyez une capture d'écran ici._`;
-                await sendMsg(from, payMsg);
-                break;
-            case '7':
-                let faqMsg = `❓ *Questions Fréquentes* ❓\n\n`;
-                faq.forEach(f => {
-                    faqMsg += `*Q: ${f.q}*\nR: ${f.a}\n\n`;
-                });
-                await sendMsg(from, faqMsg);
-                break;
-            case '8':
-                await sendMsg(from, `👨‍💻 Un conseiller va vous répondre dès que possible. Veuillez patienter.`);
-                await sendMsg(`${OWNER_NUMBER}@s.whatsapp.net`, `🔔 *Alerte* : Le client ${sender} (${from}) souhaite parler à un conseiller.`);
-                break;
-        }
-
-        if (userMessage.startsWith('commander')) {
-            await sendMsg(from, `✅ *Commande enregistrée !*\n\nVeuillez procéder au paiement via Wave, MTN ou Orange Money, puis envoyez la capture d'écran ici.\n\nLe propriétaire a été notifié et traitera votre commande rapidement. ⏱️`);
-            await sendMsg(`${OWNER_NUMBER}@s.whatsapp.net`, `🛒 *Nouvelle Commande* de ${sender} (${from}) :\n\n"${text}"\n\n_Veuillez vérifier le paiement et traiter la commande._`);
-        }
-        } // fin du for
     });
 }
 
